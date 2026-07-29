@@ -1,0 +1,23 @@
+# Secrets - never commit these
+.env
+*.session
+*.session-journal
+
+# Local environments
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Local scratch
+.DS_Store
+aipipe-test/
+eval_results.json
+
+# The grading harness is a separate upstream repo, cloned for local testing.
+# Its own private outputs must not be committed here either.
+tds-p1-t2-2026-telegram-bot/
+
+# NOTE: run.jsonl is deliberately NOT ignored - it is the file log_url serves.
+ques.txt
+data.before-fix.bak/
