@@ -64,17 +64,57 @@ def _git(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["git", *args], capture_output=True, text=True, timeout=60)
 
 
+_git_auth_ready = False
+
+
+def _configure_git_auth() -> None:
+    """Let a headless deploy (Render etc.) push over HTTPS with no stored login.
+
+    Idempotent, called once. Embeds GITHUB_TOKEN into the origin URL itself
+    rather than relying on a credential helper, which a fresh container has
+    none of. The token never appears in stdout/logs - only in local git config
+    on that container's own disk, which is never committed or exposed.
+    """
+    global _git_auth_ready
+    if _git_auth_ready:
+        return
+    _git_auth_ready = True
+
+    token = os.getenv("GITHUB_TOKEN", "").strip()
+    if token:
+        current = _git("remote", "get-url", "origin")
+        url = current.stdout.strip()
+        if url.startswith("https://") and "@" not in url.split("//", 1)[1].split("/", 1)[0]:
+            _git("remote", "set-url", "origin",
+                 url.replace("https://", f"https://x-access-token:{token}@", 1))
+
+    # A fresh container has no git identity configured; commit fails without one.
+    _git("config", "user.email", os.getenv("GIT_AUTHOR_EMAIL", "bot@tds-p1-telegram-bot.local"))
+    _git("config", "user.name", os.getenv("GIT_AUTHOR_NAME", "tds-p1-telegram-bot"))
+
+
 def _publish_blocking() -> tuple[bool, str]:
     if not (Path(".git").exists() or _git("rev-parse", "--git-dir").returncode == 0):
         return False, "not a git repository"
+    _configure_git_auth()
     if _git("add", str(LOG_FILE)).returncode != 0:
         return False, "git add failed"
     commit = _git("commit", "-m", f"run log {time.strftime('%Y-%m-%d %H:%M:%S')}")
     if commit.returncode != 0 and "nothing to commit" not in (commit.stdout + commit.stderr):
         return False, (commit.stderr or commit.stdout).strip()[:300]
-    push = _git("push")
+
+    # HEAD:main survives a shallow/detached checkout, which some hosts use.
+    push = _git("push", "origin", "HEAD:main")
     if push.returncode != 0:
-        return False, (push.stderr or push.stdout).strip()[:300]
+        # Someone else (a manual push, a previous instance) moved main forward -
+        # reconcile once and retry, rather than silently falling behind forever.
+        _git("fetch", "origin", "main")
+        if _git("rebase", "origin/main").returncode != 0:
+            _git("rebase", "--abort")
+            return False, "push rejected, rebase failed - needs a manual look"
+        push = _git("push", "origin", "HEAD:main")
+        if push.returncode != 0:
+            return False, (push.stderr or push.stdout).strip()[:300]
     return True, "pushed"
 
 
