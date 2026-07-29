@@ -194,10 +194,43 @@ async def on_error(update, context) -> None:
         pass
 
 
+def _start_keepalive_server(port: int) -> None:
+    """Bind $PORT with a trivial 200-OK server, in a background thread.
+
+    Only relevant on a host that bills/sleeps by HTTP activity (e.g. Render's
+    free Web Service tier, which requires *something* listening on $PORT and
+    puts the service to sleep after 15 minutes with no request). The Telegram
+    polling loop below never touches this thread; it exists purely so an
+    external pinger (UptimeRobot etc.) can keep the service awake for free.
+    A Background Worker deployment never sets $PORT, so this never runs there.
+    """
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Health(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, *args):
+            pass  # keep-alive pings would otherwise spam the real bot logs
+
+    server = ThreadingHTTPServer(("0.0.0.0", port), Health)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    print(f"keep-alive HTTP server listening on :{port} (for free-tier uptime pings)",
+          flush=True)
+
+
 def main() -> None:
     global _agent
 
     preflight()
+
+    port = os.getenv("PORT", "").strip()
+    if port:
+        _start_keepalive_server(int(port))
 
     issues = runlog.verify()
     if issues and "does not exist" not in issues[0]:
